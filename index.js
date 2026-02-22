@@ -36,12 +36,12 @@ app.get('/', (req, res) => {
   res.send('Мессенджер API работает!');
 });
 
-// ==================== НАСТРОЙКА ПОЧТЫ ====================
+// Настройка почтового транспорта (используем переменные окружения)
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: 'helmenplay888@gmail.com',
-    pass: 'sxho byvf cesd cznx'
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
   }
 });
 
