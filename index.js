@@ -26,10 +26,17 @@ const User = require('./models/User');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "http://localhost:3000" }
+  cors: { 
+    origin: ["http://localhost:3000", "https://glistening-cendol-f83f4a.netlify.app"],
+    methods: ["GET", "POST"],
+    credentials: true
+  }
 });
 
-app.use(cors());
+app.use(cors({
+  origin: ["http://localhost:3000", "https://glistening-cendol-f83f4a.netlify.app"],
+  credentials: true
+}));
 app.use(express.json());
 
 app.get('/', (req, res) => {
