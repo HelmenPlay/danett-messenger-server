@@ -1,6 +1,3 @@
-// Запуск сервера
-console.log('🚀 Запуск сервера...');
-
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -11,599 +8,432 @@ const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 require('dotenv').config();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
-
-// МОДЕЛИ
-const Message = require('./models/Message');
-const Group = require('./models/Group');
-const GroupMessage = require('./models/GroupMessage');
-const User = require('./models/User');
-
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { 
-    origin: ["http://localhost:3000", "https://glistening-cendol-f83f4a.netlify.app"],
-    methods: ["GET", "POST"],
+  cors: {
+    origin: process.env.CLIENT_URL || 'http://localhost:3000',
     credentials: true
   }
 });
 
 app.use(cors({
-  origin: ["http://localhost:3000", "https://glistening-cendol-f83f4a.netlify.app"],
+  origin: process.env.CLIENT_URL || 'http://localhost:3000',
   credentials: true
 }));
 app.use(express.json());
 
-app.get('/', (req, res) => {
-  res.send('Мессенджер API работает!');
-});
+// ==================== MongoDB ====================
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('❌ MongoDB error:', err));
 
-// ==================== НАСТРОЙКА ПОЧТЫ ====================
+// ==================== Схемы ====================
+const UserSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  username: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  avatar: { type: String, default: '' },
+  isVerified: { type: Boolean, default: false },
+  verificationCode: String,
+  online: { type: Boolean, default: false },
+  lastSeen: Date,
+  privacy: {
+    showLastSeen: { type: Boolean, default: true },
+    showOnline: { type: Boolean, default: true }
+  },
+  contacts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
+}, { timestamps: true });
+
+const MessageSchema = new mongoose.Schema({
+  from: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  to: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  text: String,
+  read: { type: Boolean, default: false },
+  attachments: [String]
+}, { timestamps: true });
+
+const GroupSchema = new mongoose.Schema({
+  name: String,
+  avatar: String,
+  members: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  admin: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+}, { timestamps: true });
+
+const GroupMessageSchema = new mongoose.Schema({
+  group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group' },
+  from: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  text: String,
+  attachments: [String]
+}, { timestamps: true });
+
+const CallSchema = new mongoose.Schema({
+  from: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  to: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  type: { type: String, enum: ['audio', 'video', 'group'] },
+  duration: Number,
+  status: { type: String, enum: ['missed', 'answered', 'outgoing'] },
+  participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
+}, { timestamps: true });
+
+const User = mongoose.model('User', UserSchema);
+const Message = mongoose.model('Message', MessageSchema);
+const Group = mongoose.model('Group', GroupSchema);
+const GroupMessage = mongoose.model('GroupMessage', GroupMessageSchema);
+const Call = mongoose.model('Call', CallSchema);
+
+// ==================== Email ====================
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
-  },
-  tls: {
-    rejectUnauthorized: false
   }
 });
 
-// ==================== API ДЛЯ ПОДТВЕРЖДЕНИЯ ПОЧТЫ ====================
+// ==================== API ====================
 
-app.post('/api/auth/send-verification', async (req, res) => {
+// Регистрация
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const { email } = req.body;
-    console.log('📧 Отправка кода на:', email);
+    const { name, username, email, password } = req.body;
     
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ error: 'Пользователь не найден' });
+    const existing = await User.findOne({ $or: [{ email }, { username }] });
+    if (existing) {
+      return res.status(400).json({ error: 'Email или username уже занят' });
     }
     
+    const hashedPassword = await bcrypt.hash(password, 10);
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
     
-    user.verificationToken = verificationCode;
-    await user.save();
-    
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: 'Подтверждение email - Danett Messenger',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h1 style="color: #667eea;">Добро пожаловать в Danett Messenger! 🎉</h1>
-          <p>Ваш код подтверждения:</p>
-          <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                      color: white; 
-                      padding: 20px; 
-                      border-radius: 10px; 
-                      font-size: 32px; 
-                      text-align: center;
-                      letter-spacing: 5px;
-                      margin: 20px 0;">
-            <strong>${verificationCode}</strong>
-          </div>
-          <p>Введите этот код в приложении, чтобы подтвердить свой email.</p>
-          <p>Код действителен в течение 10 минут.</p>
-          <hr style="border: 1px solid #e0e0e0; margin: 20px 0;">
-          <p style="color: #999; font-size: 12px;">
-            Если вы не регистрировались, просто проигнорируйте это письмо.
-          </p>
-        </div>
-      `
-    };
-    
-    await transporter.sendMail(mailOptions);
-    console.log('✅ Код отправлен на почту');
-    
-    res.json({ 
-      success: true, 
-      message: 'Код отправлен на почту',
-      expiresIn: 600
+    const user = await User.create({
+      name,
+      username: username.startsWith('@') ? username : `@${username}`,
+      email,
+      password: hashedPassword,
+      verificationCode
     });
     
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Код подтверждения - Danett',
+      html: `<h2>Ваш код: <b>${verificationCode}</b></h2><p>Введите его в приложении</p>`
+    });
+    
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
+    
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        username: user.username,
+        email: user.email,
+        isVerified: false
+      }
+    });
   } catch (error) {
-    console.error('❌ Ошибка отправки кода:', error);
-    res.status(500).json({ error: 'Ошибка отправки письма' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.post('/api/auth/verify-email', async (req, res) => {
+// Подтверждение email
+app.post('/api/auth/verify', async (req, res) => {
   try {
     const { email, code } = req.body;
-    
     const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(404).json({ error: 'Пользователь не найден' });
-    }
     
-    if (user.verificationToken !== code) {
+    if (!user || user.verificationCode !== code) {
       return res.status(400).json({ error: 'Неверный код' });
     }
     
     user.isVerified = true;
-    user.verificationToken = undefined;
+    user.verificationCode = undefined;
     await user.save();
     
-    res.json({ success: true, message: 'Email подтверждён' });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ==================== API для авторизации ====================
-
-app.post('/api/auth/register', async (req, res) => {
-  try {
-    const { username, email, phone, password } = req.body;
-    
-    const existingUser = await User.findOne({ 
-      $or: [{ email }, { phone }, { username }] 
-    });
-    
-    if (existingUser) {
-      if (existingUser.email === email) return res.status(400).json({ error: 'Email уже зарегистрирован' });
-      if (existingUser.phone === phone) return res.status(400).json({ error: 'Телефон уже зарегистрирован' });
-      if (existingUser.username === username) return res.status(400).json({ error: 'Имя пользователя уже занято' });
-    }
-    
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-    
-    const user = new User({ 
-      username, 
-      email, 
-      phone, 
-      password: hashedPassword,
-      isVerified: false 
-    });
-    await user.save();
-    
-    const token = jwt.sign(
-      { id: user._id, username: user.username, email: user.email },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-    
-    res.json({
-      success: true,
-      token,
-      user: { 
-        id: user._id, 
-        username: user.username, 
-        email: user.email, 
-        phone: user.phone,
-        isVerified: false 
-      }
-    });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    const { login, password } = req.body;
-    
-    const user = await User.findOne({
-      $or: [{ email: login }, { phone: login }, { username: login }]
-    });
-    
-    if (!user) return res.status(401).json({ error: 'Неверный логин или пароль' });
-    
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(401).json({ error: 'Неверный логин или пароль' });
-    
-    const token = jwt.sign(
-      { id: user._id, username: user.username, email: user.email },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-    
-    res.json({
-      success: true,
-      token,
-      user: { 
-        id: user._id, 
-        username: user.username, 
-        email: user.email, 
-        phone: user.phone,
-        isVerified: user.isVerified 
-      }
-    });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/auth/me', async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Не авторизован' });
-    
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await User.findById(decoded.id).select('-password');
-    if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
-    
-    res.json(user);
-  } catch (error) {
-    res.status(401).json({ error: 'Недействительный токен' });
-  }
-});
-
-// ==================== API для пользователя ====================
-
-app.get('/api/auth/user-by-email/:email', async (req, res) => {
-  try {
-    const email = decodeURIComponent(req.params.email);
-    const user = await User.findOne({ email }).select('username email');
-    
-    if (!user) {
-      return res.status(404).json({ error: 'Пользователь не найден' });
-    }
-    
-    res.json({ username: user.username, email: user.email });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ==================== API для сообщений ====================
-
-app.get('/api/messages/:user1/:user2', async (req, res) => {
-  try {
-    const user1 = decodeURIComponent(req.params.user1);
-    const user2 = decodeURIComponent(req.params.user2);
-    
-    const messages = await Message.find({
-      $or: [
-        { from: user1, to: user2 },
-        { from: user2, to: user1 }
-      ]
-    }).sort({ timestamp: 1 });
-    
-    res.json(messages);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/contacts/:email', async (req, res) => {
-  try {
-    const email = decodeURIComponent(req.params.email);
-    
-    const sentMessages = await Message.find({ from: email }).distinct('to');
-    const receivedMessages = await Message.find({ to: email }).distinct('from');
-    const contacts = [...new Set([...sentMessages, ...receivedMessages])];
-    
-    res.json(contacts);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ==================== API для групп ====================
-
-app.post('/api/groups', async (req, res) => {
-  try {
-    const { name, members, admin } = req.body;
-    if (!members.includes(admin)) members.push(admin);
-    
-    const group = new Group({ name, members, admin });
-    await group.save();
-    res.json(group);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/groups/:email', async (req, res) => {
-  try {
-    const email = decodeURIComponent(req.params.email);
-    const groups = await Group.find({ members: email });
-    res.json(groups);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.delete('/api/groups/:groupId', async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const { email } = req.query;
-    
-    const group = await Group.findById(groupId);
-    if (!group) return res.status(404).json({ error: 'Группа не найдена' });
-    if (group.admin !== email) return res.status(403).json({ error: 'Нет прав' });
-    
-    await GroupMessage.deleteMany({ groupId });
-    await Group.findByIdAndDelete(groupId);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/api/group-messages/:groupId', async (req, res) => {
+// Вход
+app.post('/api/auth/login', async (req, res) => {
   try {
-    const messages = await GroupMessage.find({ groupId: req.params.groupId }).sort({ timestamp: 1 });
-    res.json(messages);
+    const { login, password } = req.body;
+    const user = await User.findOne({
+      $or: [{ email: login }, { username: login }]
+    });
+    
+    if (!user || !await bcrypt.compare(password, user.password)) {
+      return res.status(401).json({ error: 'Неверные данные' });
+    }
+    
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET);
+    
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        username: user.username,
+        email: user.email,
+        avatar: user.avatar,
+        isVerified: user.isVerified,
+        privacy: user.privacy
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// ==================== ПОДКЛЮЧЕНИЕ К MONGODB ====================
-
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://Danett:MzSKDWwFbJTU7ogo@cluster0.bjj0zzy.mongodb.net/messenger?retryWrites=true&w=majority';
-
-mongoose.connect(MONGODB_URI)
-  .then(() => {
-    console.log('✅ MongoDB подключена');
-    const PORT = process.env.PORT || 5000;
-    server.listen(PORT, () => {
-      console.log(`🚀 Сервер запущен на порту ${PORT}`);
-    });
-  })
-  .catch(err => console.log('❌ Ошибка MongoDB:', err.message));
-
-// ==================== ОНЛАЙН ПОЛЬЗОВАТЕЛИ ====================
-
-const onlineUsers = {};
-// Для синхронизации статусов
-const userSockets = {}; // email -> socket.id
-
-// Периодическая синхронизация статусов (каждые 30 секунд)
-setInterval(async () => {
+// Поиск пользователей
+app.get('/api/users/search/:query', async (req, res) => {
   try {
-    // Обновляем статусы в базе
-    const onlineEmails = Object.keys(onlineUsers);
+    const query = req.params.query;
+    const users = await User.find({
+      username: { $regex: query, $options: 'i' }
+    }).select('name username avatar online').limit(20);
     
-    // Устанавливаем online: true для всех в onlineUsers
-    await User.updateMany(
-      { email: { $in: onlineEmails } },
-      { online: true, lastSeen: new Date() }
-    );
-    
-    // Устанавливаем online: false для всех остальных
-    await User.updateMany(
-      { email: { $nin: onlineEmails } },
-      { online: false }
-    );
-    
-    // Отправляем всем актуальный список онлайн
-    io.emit('online-users-update', onlineEmails);
+    res.json(users);
   } catch (error) {
-    console.error('Ошибка синхронизации статусов:', error);
+    res.status(500).json({ error: error.message });
   }
-}, 30000);
+});
 
-io.on('connection', (socket) => {
-  console.log('🔌 Новый пользователь подключился:', socket.id);
-
-  socket.on('user-connect', async (userEmail) => {
-    console.log(`👤 ${userEmail} подключился`);
-    
-    // Если пользователь уже был онлайн с другим сокетом - удаляем старый
-    if (userSockets[userEmail] && userSockets[userEmail] !== socket.id) {
-      const oldSocketId = userSockets[userEmail];
-      delete onlineUsers[oldSocketId];
-      io.to(oldSocketId).emit('force-disconnect', 'Новое подключение с другого устройства');
+// Добавить в контакты
+app.post('/api/users/contact/:id', async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user.contacts.includes(req.params.id)) {
+      user.contacts.push(req.params.id);
+      await user.save();
     }
-    
-    onlineUsers[userEmail] = socket.id;
-    userSockets[userEmail] = socket.id;
-    socket.userEmail = userEmail;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-    try {
-      await User.findOneAndUpdate(
-        { email: userEmail },
-        { online: true, lastSeen: new Date() }
-      );
-    } catch (error) {
-      console.error('Ошибка обновления пользователя:', error);
-    }
+// Мои контакты
+app.get('/api/users/contacts', async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).populate('contacts', 'name username avatar online');
+    res.json(user.contacts);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-    // Отправляем всем обновление статуса
-    io.emit('user-status', { userEmail, status: 'online' });
+// История звонков
+app.get('/api/calls', async (req, res) => {
+  try {
+    const calls = await Call.find({
+      $or: [{ from: req.userId }, { to: req.userId }]
+    })
+    .populate('from', 'name username avatar')
+    .populate('to', 'name username avatar')
+    .sort('-createdAt')
+    .limit(50);
     
-    // Отправляем текущему пользователю список всех онлайн
-    socket.emit('current-users', Object.keys(onlineUsers));
+    res.json(calls);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==================== WebSocket ====================
+const users = new Map(); // userId -> socketId
+const rooms = new Map(); // groupId -> Set of userIds
+
+io.use((socket, next) => {
+  const token = socket.handshake.auth.token;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    socket.userId = decoded.id;
+    next();
+  } catch {
+    next(new Error('unauthorized'));
+  }
+}).on('connection', (socket) => {
+  console.log('🔌 User connected:', socket.userId);
+  users.set(socket.userId.toString(), socket.id);
+  
+  // Обновляем статус онлайн
+  User.findByIdAndUpdate(socket.userId, { online: true });
+  
+  // Отправляем список онлайн контактов
+  socket.on('get-online', async () => {
+    const user = await User.findById(socket.userId).populate('contacts');
+    const onlineContacts = user.contacts
+      .filter(c => users.has(c._id.toString()))
+      .map(c => c._id.toString());
+    
+    socket.emit('online-users', onlineContacts);
   });
-
-  socket.on('private-message', async ({ to, from, message }) => {
-    try {
-      const newMessage = new Message({ from, to, message, timestamp: new Date() });
-      await newMessage.save();
-      
-      const targetSocketId = onlineUsers[to];
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('private-message', { 
-          from, 
-          message, 
-          timestamp: new Date(),
-          id: newMessage._id
-        });
+  
+  // Приватное сообщение
+  socket.on('private-message', async (data) => {
+    const message = await Message.create({
+      from: socket.userId,
+      to: data.to,
+      text: data.text
+    });
+    
+    const toSocket = users.get(data.to);
+    if (toSocket) {
+      io.to(toSocket).emit('private-message', {
+        ...message.toObject(),
+        from: socket.userId
+      });
+    }
+  });
+  
+  // Создание группы
+  socket.on('create-group', async (data) => {
+    const group = await Group.create({
+      name: data.name,
+      members: [socket.userId, ...data.members],
+      admin: socket.userId
+    });
+    
+    group.members.forEach(memberId => {
+      const memberSocket = users.get(memberId.toString());
+      if (memberSocket) {
+        io.to(memberSocket).emit('group-created', group);
       }
-      
-      // Подтверждение отправителю
-      socket.emit('message-sent', { id: newMessage._id, to, timestamp: newMessage.timestamp });
-      
-    } catch (error) {
-      console.log('❌ Ошибка:', error.message);
-      socket.emit('message-error', { to, message: 'Ошибка отправки сообщения' });
-    }
+    });
   });
-
-  socket.on('typing', ({ to, from, isTyping }) => {
-    const targetSocketId = onlineUsers[to];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('typing-status', { from, isTyping });
-    }
-  });
-
-  socket.on('group-message', async ({ groupId, from, message }) => {
-    try {
-      const newMessage = new GroupMessage({ groupId, from, message, timestamp: new Date() });
-      await newMessage.save();
-      
-      const group = await Group.findById(groupId);
-      if (group) {
-        group.members.forEach(member => {
-          const memberSocketId = onlineUsers[member];
-          if (memberSocketId && member !== from) {
-            io.to(memberSocketId).emit('group-message', { 
-              groupId, 
-              from, 
-              message, 
-              timestamp: new Date(),
-              id: newMessage._id
-            });
-          }
-        });
+  
+  // Групповое сообщение
+  socket.on('group-message', async (data) => {
+    const message = await GroupMessage.create({
+      group: data.groupId,
+      from: socket.userId,
+      text: data.text
+    });
+    
+    const group = await Group.findById(data.groupId);
+    group.members.forEach(memberId => {
+      if (memberId.toString() !== socket.userId) {
+        const memberSocket = users.get(memberId.toString());
+        if (memberSocket) {
+          io.to(memberSocket).emit('group-message', {
+            ...message.toObject(),
+            from: socket.userId,
+            group: data.groupId
+          });
+        }
       }
-    } catch (error) {
-      console.log('❌ Ошибка:', error.message);
-    }
+    });
   });
-
-  // ==================== ВИДЕОЗВОНКИ (ИСПРАВЛЕНО) ====================
-
+  
+  // Звонок
   socket.on('call-user', (data) => {
-    console.log('📞 Звонок от', data.from, 'для', data.to, 'ID:', data.callId);
-    
-    const targetSocketId = onlineUsers[data.to];
-    
-    if (targetSocketId) {
-      // Отправляем звонок получателю
-      io.to(targetSocketId).emit('incoming-call', {
-        from: data.from,
+    const toSocket = users.get(data.to);
+    if (toSocket) {
+      io.to(toSocket).emit('incoming-call', {
+        from: socket.userId,
         fromUsername: data.fromUsername,
         offer: data.offer,
         callId: data.callId
       });
-      
-      // Подтверждение отправителю
-      socket.emit('call-ringing', { to: data.to, callId: data.callId });
-      console.log('✅ Звонок доставлен получателю');
-    } else {
-      console.log('❌ Получатель не в сети');
-      socket.emit('call-error', { message: 'Пользователь не в сети' });
     }
   });
-
-  socket.on('accept-call', (data) => {
-    console.log('✅ Звонок принят от', data.from, 'для', data.to);
+  
+  // Групповой звонок
+  socket.on('group-call', (data) => {
+    const room = `call_${data.groupId}`;
+    socket.join(room);
     
-    const targetSocketId = onlineUsers[data.to];
-    
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('call-accepted', {
-        from: data.from,
-        fromUsername: data.fromUsername,
-        answer: data.answer,
-        callId: data.callId
-      });
-    }
+    data.members.forEach(memberId => {
+      if (memberId !== socket.userId) {
+        const memberSocket = users.get(memberId);
+        if (memberSocket) {
+          io.to(memberSocket).emit('group-call-invite', {
+            groupId: data.groupId,
+            from: socket.userId,
+            fromUsername: data.fromUsername,
+            members: data.members
+          });
+        }
+      }
+    });
   });
-
-  socket.on('reject-call', (data) => {
-    console.log('❌ Звонок отклонен от', data.from);
-    const targetSocketId = onlineUsers[data.to];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('call-rejected', {
-        from: data.from,
-        fromUsername: data.fromUsername,
-        callId: data.callId
-      });
-    }
+  
+  socket.on('join-call', (data) => {
+    const room = `call_${data.groupId}`;
+    socket.join(room);
+    socket.to(room).emit('user-joined-call', {
+      userId: socket.userId,
+      username: data.username
+    });
   });
-
-  // ВАЖНО: передача ICE-кандидатов
+  
+  // ICE кандидаты
   socket.on('ice-candidate', (data) => {
-    console.log('🧊 ICE кандидат от', data.from, 'для', data.to);
-    const targetSocketId = onlineUsers[data.to];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('ice-candidate', {
-        from: data.from,
+    const toSocket = users.get(data.to);
+    if (toSocket) {
+      io.to(toSocket).emit('ice-candidate', {
+        from: socket.userId,
         candidate: data.candidate,
         callId: data.callId
       });
     }
   });
-
-  socket.on('end-call', (data) => {
-    console.log('📴 Звонок завершен от', data.from);
-    const targetSocketId = onlineUsers[data.to];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('call-ended', {
-        from: data.from,
-        fromUsername: data.fromUsername,
+  
+  socket.on('group-ice-candidate', (data) => {
+    const room = `call_${data.groupId}`;
+    socket.to(room).emit('group-ice-candidate', {
+      from: socket.userId,
+      candidate: data.candidate
+    });
+  });
+  
+  // Завершение звонка
+  socket.on('end-call', async (data) => {
+    const toSocket = users.get(data.to);
+    if (toSocket) {
+      io.to(toSocket).emit('call-ended', {
+        from: socket.userId,
         callId: data.callId
       });
     }
-  });
-
-  // НОВОЕ: пользователь занят (уже в звонке)
-  socket.on('call-busy', (data) => {
-    const targetSocketId = onlineUsers[data.to];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('call-busy', {
-        from: data.from,
-        fromUsername: data.fromUsername,
-        callId: data.callId
+    
+    // Сохраняем в историю
+    if (data.duration) {
+      await Call.create({
+        from: socket.userId,
+        to: data.to,
+        type: 'video',
+        duration: data.duration,
+        status: data.status
       });
     }
   });
-
-  // НОВОЕ: отключение микрофона/камеры во время звонка
-  socket.on('call-toggle-audio', (data) => {
-    const targetSocketId = onlineUsers[data.to];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('call-audio-toggled', {
-        from: data.from,
-        muted: data.muted,
-        callId: data.callId
-      });
-    }
+  
+  socket.on('end-group-call', (data) => {
+    const room = `call_${data.groupId}`;
+    io.to(room).emit('group-call-ended');
+    socket.leave(room);
   });
-
-  socket.on('call-toggle-video', (data) => {
-    const targetSocketId = onlineUsers[data.to];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('call-video-toggled', {
-        from: data.from,
-        off: data.off,
-        callId: data.callId
-      });
-    }
+  
+  // Отключение
+  socket.on('disconnect', () => {
+    console.log('🔌 User disconnected:', socket.userId);
+    users.delete(socket.userId.toString());
+    User.findByIdAndUpdate(socket.userId, { 
+      online: false,
+      lastSeen: new Date()
+    });
   });
+});
 
-  socket.on('disconnect', async () => {
-    if (socket.userEmail) {
-      console.log(`👋 ${socket.userEmail} отключился`);
-      
-      // Удаляем из онлайн
-      delete onlineUsers[socket.userEmail];
-      delete userSockets[socket.userEmail];
-
-      try {
-        await User.findOneAndUpdate(
-          { email: socket.userEmail },
-          { online: false, lastSeen: new Date() }
-        );
-      } catch (error) {
-        console.error('Ошибка обновления статуса:', error);
-      }
-
-      // Оповещаем всех
-      io.emit('user-status', { userEmail: socket.userEmail, status: 'offline' });
-    }
-  });
+// ==================== Запуск ====================
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
