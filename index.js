@@ -474,76 +474,116 @@ io.on('connection', (socket) => {
   });
 
   // ==================== ВИДЕОЗВОНКИ (ИСПРАВЛЕНО) ====================
+
+socket.on('call-user', (data) => {
+  console.log('📞 Звонок от', data.from, 'для', data.to, 'ID:', data.callId);
   
-  socket.on('call-user', (data) => {
-    console.log('📞 Звонок от', data.from, 'для', data.to);
+  const targetSocketId = onlineUsers[data.to];
+  
+  if (targetSocketId) {
+    // Отправляем звонок получателю
+    io.to(targetSocketId).emit('incoming-call', {
+      from: data.from,
+      fromUsername: data.fromUsername,
+      offer: data.offer,
+      callId: data.callId
+    });
     
-    const targetSocketId = onlineUsers[data.to];
-    
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('incoming-call', {
-        from: data.from,
-        fromUsername: data.fromUsername,
-        offer: data.offer,
-        callId: data.callId || Date.now().toString()
-      });
-      
-      // Подтверждение отправителю, что звонок доставлен
-      socket.emit('call-ringing', { to: data.to });
-    } else {
-      socket.emit('call-error', { message: 'Пользователь не в сети' });
-    }
-  });
+    // Подтверждение отправителю
+    socket.emit('call-ringing', { to: data.to, callId: data.callId });
+    console.log('✅ Звонок доставлен получателю');
+  } else {
+    console.log('❌ Получатель не в сети');
+    socket.emit('call-error', { message: 'Пользователь не в сети' });
+  }
+});
 
-  socket.on('accept-call', (data) => {
-    console.log('✅ Звонок принят от', data.from, 'для', data.to);
-    
-    const targetSocketId = onlineUsers[data.to];
-    
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('call-accepted', {
-        from: data.from,
-        fromUsername: data.fromUsername,
-        answer: data.answer,
-        callId: data.callId
-      });
-    }
-  });
+socket.on('accept-call', (data) => {
+  console.log('✅ Звонок принят от', data.from, 'для', data.to);
+  
+  const targetSocketId = onlineUsers[data.to];
+  
+  if (targetSocketId) {
+    io.to(targetSocketId).emit('call-accepted', {
+      from: data.from,
+      fromUsername: data.fromUsername,
+      answer: data.answer,
+      callId: data.callId
+    });
+  }
+});
 
-  socket.on('reject-call', (data) => {
-    const targetSocketId = onlineUsers[data.to];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('call-rejected', {
-        from: data.from,
-        fromUsername: data.fromUsername,
-        callId: data.callId
-      });
-    }
-  });
+socket.on('reject-call', (data) => {
+  console.log('❌ Звонок отклонен от', data.from);
+  const targetSocketId = onlineUsers[data.to];
+  if (targetSocketId) {
+    io.to(targetSocketId).emit('call-rejected', {
+      from: data.from,
+      fromUsername: data.fromUsername,
+      callId: data.callId
+    });
+  }
+});
 
-  // НОВОЕ: передача ICE-кандидатов
-  socket.on('ice-candidate', (data) => {
-    const targetSocketId = onlineUsers[data.to];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('ice-candidate', {
-        from: data.from,
-        candidate: data.candidate,
-        callId: data.callId
-      });
-    }
-  });
+// ВАЖНО: передача ICE-кандидатов
+socket.on('ice-candidate', (data) => {
+  console.log('🧊 ICE кандидат от', data.from, 'для', data.to);
+  const targetSocketId = onlineUsers[data.to];
+  if (targetSocketId) {
+    io.to(targetSocketId).emit('ice-candidate', {
+      from: data.from,
+      candidate: data.candidate,
+      callId: data.callId
+    });
+  }
+});
 
-  // НОВОЕ: пользователь занят (уже в звонке)
-  socket.on('call-busy', (data) => {
-    const targetSocketId = onlineUsers[data.to];
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('call-busy', {
-        from: data.from,
-        fromUsername: data.fromUsername
-      });
-    }
-  });
+socket.on('end-call', (data) => {
+  console.log('📴 Звонок завершен от', data.from);
+  const targetSocketId = onlineUsers[data.to];
+  if (targetSocketId) {
+    io.to(targetSocketId).emit('call-ended', {
+      from: data.from,
+      fromUsername: data.fromUsername,
+      callId: data.callId
+    });
+  }
+});
 
+// НОВОЕ: пользователь занят (уже в звонке)
+socket.on('call-busy', (data) => {
+  const targetSocketId = onlineUsers[data.to];
+  if (targetSocketId) {
+    io.to(targetSocketId).emit('call-busy', {
+      from: data.from,
+      fromUsername: data.fromUsername,
+      callId: data.callId
+    });
+  }
+});
+
+// НОВОЕ: отключение микрофона/камеры во время звонка
+socket.on('call-toggle-audio', (data) => {
+  const targetSocketId = onlineUsers[data.to];
+  if (targetSocketId) {
+    io.to(targetSocketId).emit('call-audio-toggled', {
+      from: data.from,
+      muted: data.muted,
+      callId: data.callId
+    });
+  }
+});
+
+socket.on('call-toggle-video', (data) => {
+  const targetSocketId = onlineUsers[data.to];
+  if (targetSocketId) {
+    io.to(targetSocketId).emit('call-video-toggled', {
+      from: data.from,
+      off: data.off,
+      callId: data.callId
+    });
+  }
+});
   // НОВОЕ: завершение звонка
   socket.on('end-call', (data) => {
     const targetSocketId = onlineUsers[data.to];
