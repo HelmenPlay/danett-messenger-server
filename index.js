@@ -23,6 +23,14 @@ app.use(cors({
 }));
 app.use(express.json());
 
+app.get('/', (req, res) => {
+  res.send('🚀 Danett Messenger API is running');
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', time: new Date() });
+});
+
 // ==================== MongoDB ====================
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ MongoDB connected'))
