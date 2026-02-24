@@ -9,6 +9,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
+require('dotenv').config();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
 
@@ -163,7 +164,7 @@ app.post('/api/auth/register', async (req, res) => {
     await user.save();
     
     const token = jwt.sign(
-      { id: user._id, username: user.username },
+      { id: user._id, username: user.username, email: user.email },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -199,7 +200,7 @@ app.post('/api/auth/login', async (req, res) => {
     if (!isMatch) return res.status(401).json({ error: 'Неверный логин или пароль' });
     
     const token = jwt.sign(
-      { id: user._id, username: user.username },
+      { id: user._id, username: user.username, email: user.email },
       JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -340,11 +341,14 @@ app.get('/api/group-messages/:groupId', async (req, res) => {
 
 // ==================== ПОДКЛЮЧЕНИЕ К MONGODB ====================
 
-mongoose.connect('mongodb+srv://Danett:MzSKDWwFbJTU7ogo@cluster0.bjj0zzy.mongodb.net/messenger?retryWrites=true&w=majority')
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://Danett:MzSKDWwFbJTU7ogo@cluster0.bjj0zzy.mongodb.net/messenger?retryWrites=true&w=majority';
+
+mongoose.connect(MONGODB_URI)
   .then(() => {
     console.log('✅ MongoDB подключена');
-    server.listen(5000, () => {
-      console.log('🚀 Сервер запущен на http://localhost:5000');
+    const PORT = process.env.PORT || 5000;
+    server.listen(PORT, () => {
+      console.log(`🚀 Сервер запущен на порту ${PORT}`);
     });
   })
   .catch(err => console.log('❌ Ошибка MongoDB:', err.message));
@@ -352,6 +356,33 @@ mongoose.connect('mongodb+srv://Danett:MzSKDWwFbJTU7ogo@cluster0.bjj0zzy.mongodb
 // ==================== ОНЛАЙН ПОЛЬЗОВАТЕЛИ ====================
 
 const onlineUsers = {};
+// Для синхронизации статусов
+const userSockets = {}; // email -> socket.id
+
+// Периодическая синхронизация статусов (каждые 30 секунд)
+setInterval(async () => {
+  try {
+    // Обновляем статусы в базе
+    const onlineEmails = Object.keys(onlineUsers);
+    
+    // Устанавливаем online: true для всех в onlineUsers
+    await User.updateMany(
+      { email: { $in: onlineEmails } },
+      { online: true, lastSeen: new Date() }
+    );
+    
+    // Устанавливаем online: false для всех остальных
+    await User.updateMany(
+      { email: { $nin: onlineEmails } },
+      { online: false }
+    );
+    
+    // Отправляем всем актуальный список онлайн
+    io.emit('online-users-update', onlineEmails);
+  } catch (error) {
+    console.error('Ошибка синхронизации статусов:', error);
+  }
+}, 30000);
 
 io.on('connection', (socket) => {
   console.log('🔌 Новый пользователь подключился:', socket.id);
@@ -359,7 +390,15 @@ io.on('connection', (socket) => {
   socket.on('user-connect', async (userEmail) => {
     console.log(`👤 ${userEmail} подключился`);
     
+    // Если пользователь уже был онлайн с другим сокетом - удаляем старый
+    if (userSockets[userEmail] && userSockets[userEmail] !== socket.id) {
+      const oldSocketId = userSockets[userEmail];
+      delete onlineUsers[oldSocketId];
+      io.to(oldSocketId).emit('force-disconnect', 'Новое подключение с другого устройства');
+    }
+    
     onlineUsers[userEmail] = socket.id;
+    userSockets[userEmail] = socket.id;
     socket.userEmail = userEmail;
 
     try {
@@ -371,7 +410,10 @@ io.on('connection', (socket) => {
       console.error('Ошибка обновления пользователя:', error);
     }
 
+    // Отправляем всем обновление статуса
     io.emit('user-status', { userEmail, status: 'online' });
+    
+    // Отправляем текущему пользователю список всех онлайн
     socket.emit('current-users', Object.keys(onlineUsers));
   });
 
@@ -380,17 +422,29 @@ io.on('connection', (socket) => {
       const newMessage = new Message({ from, to, message, timestamp: new Date() });
       await newMessage.save();
       
-      if (onlineUsers[to]) {
-        io.to(onlineUsers[to]).emit('private-message', { from, message, timestamp: new Date() });
+      const targetSocketId = onlineUsers[to];
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('private-message', { 
+          from, 
+          message, 
+          timestamp: new Date(),
+          id: newMessage._id
+        });
       }
+      
+      // Подтверждение отправителю
+      socket.emit('message-sent', { id: newMessage._id, to, timestamp: newMessage.timestamp });
+      
     } catch (error) {
       console.log('❌ Ошибка:', error.message);
+      socket.emit('message-error', { to, message: 'Ошибка отправки сообщения' });
     }
   });
 
   socket.on('typing', ({ to, from, isTyping }) => {
-    if (onlineUsers[to]) {
-      io.to(onlineUsers[to]).emit('typing-status', { from, isTyping });
+    const targetSocketId = onlineUsers[to];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('typing-status', { from, isTyping });
     }
   });
 
@@ -400,29 +454,42 @@ io.on('connection', (socket) => {
       await newMessage.save();
       
       const group = await Group.findById(groupId);
-      group.members.forEach(member => {
-        if (onlineUsers[member] && member !== from) {
-          io.to(onlineUsers[member]).emit('group-message', { groupId, from, message, timestamp: new Date() });
-        }
-      });
+      if (group) {
+        group.members.forEach(member => {
+          const memberSocketId = onlineUsers[member];
+          if (memberSocketId && member !== from) {
+            io.to(memberSocketId).emit('group-message', { 
+              groupId, 
+              from, 
+              message, 
+              timestamp: new Date(),
+              id: newMessage._id
+            });
+          }
+        });
+      }
     } catch (error) {
       console.log('❌ Ошибка:', error.message);
     }
   });
 
-  // ==================== ВИДЕОЗВОНКИ ====================
+  // ==================== ВИДЕОЗВОНКИ (ИСПРАВЛЕНО) ====================
   
   socket.on('call-user', (data) => {
     console.log('📞 Звонок от', data.from, 'для', data.to);
     
-    const targetSocket = onlineUsers[data.to];
+    const targetSocketId = onlineUsers[data.to];
     
-    if (targetSocket) {
-      io.to(targetSocket).emit('incoming-call', {
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('incoming-call', {
         from: data.from,
         fromUsername: data.fromUsername,
-        offer: data.offer
+        offer: data.offer,
+        callId: data.callId || Date.now().toString()
       });
+      
+      // Подтверждение отправителю, что звонок доставлен
+      socket.emit('call-ringing', { to: data.to });
     } else {
       socket.emit('call-error', { message: 'Пользователь не в сети' });
     }
@@ -431,43 +498,81 @@ io.on('connection', (socket) => {
   socket.on('accept-call', (data) => {
     console.log('✅ Звонок принят от', data.from, 'для', data.to);
     
-    const targetSocket = onlineUsers[data.to];
+    const targetSocketId = onlineUsers[data.to];
     
-    if (targetSocket) {
-      io.to(targetSocket).emit('call-accepted', {
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call-accepted', {
         from: data.from,
         fromUsername: data.fromUsername,
-        answer: data.answer
+        answer: data.answer,
+        callId: data.callId
       });
     }
   });
 
   socket.on('reject-call', (data) => {
-    const targetSocket = onlineUsers[data.to];
-    if (targetSocket) {
-      io.to(targetSocket).emit('call-rejected', {
+    const targetSocketId = onlineUsers[data.to];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call-rejected', {
         from: data.from,
-        fromUsername: data.fromUsername
+        fromUsername: data.fromUsername,
+        callId: data.callId
       });
     }
   });
 
+  // НОВОЕ: передача ICE-кандидатов
   socket.on('ice-candidate', (data) => {
-    const targetSocket = onlineUsers[data.to];
-    if (targetSocket) {
-      io.to(targetSocket).emit('ice-candidate', {
+    const targetSocketId = onlineUsers[data.to];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('ice-candidate', {
         from: data.from,
-        candidate: data.candidate
+        candidate: data.candidate,
+        callId: data.callId
       });
     }
   });
 
-  socket.on('end-call', (data) => {
-    const targetSocket = onlineUsers[data.to];
-    if (targetSocket) {
-      io.to(targetSocket).emit('call-ended', {
+  // НОВОЕ: пользователь занят (уже в звонке)
+  socket.on('call-busy', (data) => {
+    const targetSocketId = onlineUsers[data.to];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call-busy', {
         from: data.from,
         fromUsername: data.fromUsername
+      });
+    }
+  });
+
+  // НОВОЕ: завершение звонка
+  socket.on('end-call', (data) => {
+    const targetSocketId = onlineUsers[data.to];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call-ended', {
+        from: data.from,
+        fromUsername: data.fromUsername,
+        callId: data.callId
+      });
+    }
+  });
+
+  // НОВОЕ: отключение микрофона/камеры во время звонка
+  socket.on('call-toggle-audio', (data) => {
+    const targetSocketId = onlineUsers[data.to];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call-audio-toggled', {
+        from: data.from,
+        muted: data.muted
+      });
+    }
+  });
+
+  socket.on('call-toggle-video', (data) => {
+    const targetSocketId = onlineUsers[data.to];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('call-video-toggled', {
+        from: data.from,
+        off: data.off
       });
     }
   });
@@ -476,7 +581,9 @@ io.on('connection', (socket) => {
     if (socket.userEmail) {
       console.log(`👋 ${socket.userEmail} отключился`);
       
+      // Удаляем из онлайн
       delete onlineUsers[socket.userEmail];
+      delete userSockets[socket.userEmail];
 
       try {
         await User.findOneAndUpdate(
@@ -487,6 +594,7 @@ io.on('connection', (socket) => {
         console.error('Ошибка обновления статуса:', error);
       }
 
+      // Оповещаем всех
       io.emit('user-status', { userEmail: socket.userEmail, status: 'offline' });
     }
   });
