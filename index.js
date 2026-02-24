@@ -102,6 +102,36 @@ const transporter = nodemailer.createTransport({
 
 // ==================== API ====================
 
+// 👇 ВАЖНО: ПОЛУЧЕНИЕ ТЕКУЩЕГО ПОЛЬЗОВАТЕЛЯ (ЭТОГО НЕ ХВАТАЛО!)
+app.get('/api/auth/me', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).select('-password -verificationCode');
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      id: user._id,
+      name: user.name,
+      username: user.username,
+      email: user.email,
+      avatar: user.avatar,
+      isVerified: user.isVerified,
+      privacy: user.privacy,
+      createdAt: user.createdAt
+    });
+  } catch (error) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+});
+
 // Регистрация
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -215,7 +245,10 @@ app.get('/api/users/search/:query', async (req, res) => {
 // Добавить в контакты
 app.post('/api/users/contact/:id', async (req, res) => {
   try {
-    const user = await User.findById(req.userId);
+    const token = req.headers.authorization?.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id);
+    
     if (!user.contacts.includes(req.params.id)) {
       user.contacts.push(req.params.id);
       await user.save();
@@ -229,7 +262,9 @@ app.post('/api/users/contact/:id', async (req, res) => {
 // Мои контакты
 app.get('/api/users/contacts', async (req, res) => {
   try {
-    const user = await User.findById(req.userId).populate('contacts', 'name username avatar online');
+    const token = req.headers.authorization?.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.id).populate('contacts', 'name username avatar online');
     res.json(user.contacts);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -239,8 +274,11 @@ app.get('/api/users/contacts', async (req, res) => {
 // История звонков
 app.get('/api/calls', async (req, res) => {
   try {
+    const token = req.headers.authorization?.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    
     const calls = await Call.find({
-      $or: [{ from: req.userId }, { to: req.userId }]
+      $or: [{ from: decoded.id }, { to: decoded.id }]
     })
     .populate('from', 'name username avatar')
     .populate('to', 'name username avatar')
@@ -255,7 +293,6 @@ app.get('/api/calls', async (req, res) => {
 
 // ==================== WebSocket ====================
 const users = new Map(); // userId -> socketId
-const rooms = new Map(); // groupId -> Set of userIds
 
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
@@ -295,7 +332,8 @@ io.use((socket, next) => {
     if (toSocket) {
       io.to(toSocket).emit('private-message', {
         ...message.toObject(),
-        from: socket.userId
+        from: socket.userId,
+        fromUsername: data.fromUsername
       });
     }
   });
@@ -332,6 +370,7 @@ io.use((socket, next) => {
           io.to(memberSocket).emit('group-message', {
             ...message.toObject(),
             from: socket.userId,
+            fromUsername: data.fromUsername,
             group: data.groupId
           });
         }
@@ -347,6 +386,29 @@ io.use((socket, next) => {
         from: socket.userId,
         fromUsername: data.fromUsername,
         offer: data.offer,
+        callId: data.callId
+      });
+    }
+  });
+  
+  // Принять звонок
+  socket.on('accept-call', (data) => {
+    const toSocket = users.get(data.to);
+    if (toSocket) {
+      io.to(toSocket).emit('call-accepted', {
+        from: socket.userId,
+        answer: data.answer,
+        callId: data.callId
+      });
+    }
+  });
+  
+  // Отклонить звонок
+  socket.on('reject-call', (data) => {
+    const toSocket = users.get(data.to);
+    if (toSocket) {
+      io.to(toSocket).emit('call-rejected', {
+        from: socket.userId,
         callId: data.callId
       });
     }
