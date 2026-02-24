@@ -1,4 +1,3 @@
-require('dotenv').config();
 // Запуск сервера
 console.log('🚀 Запуск сервера...');
 
@@ -43,12 +42,16 @@ app.get('/', (req, res) => {
   res.send('Мессенджер API работает!');
 });
 
-// Настройка почтового транспорта (используем переменные окружения)
+// ==================== НАСТРОЙКА ПОЧТЫ ====================
+// Используем переменные окружения
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS
+  },
+  tls: {
+    rejectUnauthorized: false
   }
 });
 
@@ -71,7 +74,7 @@ app.post('/api/auth/send-verification', async (req, res) => {
     await user.save();
     
     const mailOptions = {
-      from: 'your-email@gmail.com',
+      from: process.env.EMAIL_USER,
       to: email,
       subject: 'Подтверждение email - Danett Messenger',
       html: `
@@ -353,7 +356,7 @@ app.get('/api/group-messages/:groupId', async (req, res) => {
 });
 
 // Подключение к MongoDB
-mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://Danett:MzSKDWwFbJTU7ogo@cluster0.bjj0zzy.mongodb.net/messenger?retryWrites=true&w=majority')
+mongoose.connect('mongodb+srv://Danett:MzSKDWwFbJTU7ogo@cluster0.bjj0zzy.mongodb.net/messenger?retryWrites=true&w=majority')
   .then(() => {
     console.log('✅ MongoDB подключена');
     console.log('📦 Проверка моделей:');
@@ -374,56 +377,50 @@ const onlineUsers = {};
 io.on('connection', (socket) => {
   console.log('🔌 Новый пользователь подключился:', socket.id);
 
-   socket.on('user-connect', async (userEmail) => {
-  console.log(`👤 ${userEmail} подключился с socket.id: ${socket.id}`);
-  
-  // Сохраняем в памяти
-  onlineUsers[userEmail] = socket.id;
-  socket.userEmail = userEmail;
-
-  // Обновляем статус в базе данных
-  try {
-    await User.findOneAndUpdate(
-      { email: userEmail },
-      { online: true, lastSeen: new Date() }
-    );
-  } catch (error) {
-    console.error('Ошибка обновления пользователя:', error);
-  }
-
-  // Отправляем ВСЕМ обновленный список онлайн
-  io.emit('user-status', { userEmail, status: 'online' });
-  
-  // Отправляем текущему пользователю список всех онлайн
-  socket.emit('current-users', Object.keys(onlineUsers));
-  
-  console.log('👥 Текущие онлайн пользователи:', Object.keys(onlineUsers));
-});
-
-socket.on('disconnect', async () => {
-  console.log('❌ Пользователь отключился:', socket.id);
-
-  if (socket.userEmail) {
-    console.log(`👋 ${socket.userEmail} отключился`);
+  socket.on('user-connect', async (userEmail) => {
+    console.log(`👤 ${userEmail} подключился с socket.id: ${socket.id}`);
     
-    // Удаляем из памяти
-    delete onlineUsers[socket.userEmail];
+    onlineUsers[userEmail] = socket.id;
+    socket.userEmail = userEmail;
 
-    // Обновляем статус в базе данных
     try {
       await User.findOneAndUpdate(
-        { email: socket.userEmail },
-        { online: false, lastSeen: new Date() }
+        { email: userEmail },
+        { online: true, lastSeen: new Date() }
       );
     } catch (error) {
-      console.error('Ошибка обновления статуса:', error);
+      console.error('Ошибка обновления пользователя:', error);
     }
 
-    // Уведомляем всех
-    io.emit('user-status', { userEmail: socket.userEmail, status: 'offline' });
-    console.log('👥 Остались онлайн:', Object.keys(onlineUsers));
-  }
-});
+    io.emit('user-status', { userEmail, status: 'online' });
+    socket.emit('current-users', Object.keys(onlineUsers));
+    
+    console.log('👥 Текущие онлайн пользователи:', Object.keys(onlineUsers));
+  });
+
+  socket.on('private-message', async ({ to, from, message }) => {
+    console.log(`📨 Сообщение от ${from} к ${to}: ${message}`);
+    
+    try {
+      const newMessage = new Message({ from, to, message, timestamp: new Date() });
+      await newMessage.save();
+      
+      if (onlineUsers[to]) {
+        io.to(onlineUsers[to]).emit('private-message', { from, message, timestamp: new Date() });
+        console.log('✅ Сообщение отправлено получателю');
+      } else {
+        console.log('📦 Получатель не в сети, сообщение сохранено');
+      }
+    } catch (error) {
+      console.log('❌ Ошибка:', error.message);
+    }
+  });
+
+  socket.on('typing', ({ to, from, isTyping }) => {
+    if (onlineUsers[to]) {
+      io.to(onlineUsers[to]).emit('typing-status', { from, isTyping });
+    }
+  });
 
   socket.on('group-message', async ({ groupId, from, message }) => {
     console.log(`👥 Групповое сообщение от ${from} в группу ${groupId}: ${message}`);
@@ -450,7 +447,6 @@ socket.on('disconnect', async () => {
     console.log('   От:', data.from);
     console.log('   Кому:', data.to);
     console.log('   Имя:', data.fromUsername);
-    console.log('   Все онлайн пользователи:', Object.keys(onlineUsers));
     
     const targetSocket = onlineUsers[data.to];
     
@@ -461,10 +457,8 @@ socket.on('disconnect', async () => {
         fromUsername: data.fromUsername,
         offer: data.offer
       });
-      console.log('✅ Событие incoming-call отправлено');
     } else {
       console.log(`❌ ${data.to} не в сети!`);
-      console.log('   Доступные пользователи:', Object.keys(onlineUsers));
       socket.emit('call-error', { message: 'Пользователь не в сети' });
     }
   });
@@ -473,19 +467,16 @@ socket.on('disconnect', async () => {
     console.log('✅ ===== ПРИНЯТИЕ ЗВОНКА (accept-call) =====');
     console.log('   От (кто принял):', data.from);
     console.log('   Кому (инициатор):', data.to);
-    console.log('   Имя:', data.fromUsername);
-    console.log('   Есть answer:', !!data.answer);
     
     const targetSocket = onlineUsers[data.to];
     
     if (targetSocket) {
-      console.log(`✅ Отправляем ответ инициатору ${data.to} на сокет ${targetSocket}`);
+      console.log(`✅ Отправляем ответ инициатору ${data.to}`);
       io.to(targetSocket).emit('call-accepted', {
         from: data.from,
         fromUsername: data.fromUsername,
         answer: data.answer
       });
-      console.log('✅ Событие call-accepted отправлено');
     } else {
       console.log(`❌ Инициатор ${data.to} не в сети!`);
     }
@@ -530,16 +521,14 @@ socket.on('disconnect', async () => {
     }
   });
 
-    socket.on('disconnect', async () => {
+  socket.on('disconnect', async () => {
     console.log('❌ Пользователь отключился:', socket.id);
-    
+
     if (socket.userEmail) {
       console.log(`👋 ${socket.userEmail} отключился`);
       
-      // Удаляем из памяти
       delete onlineUsers[socket.userEmail];
-      
-      // Обновляем статус в базе данных
+
       try {
         await User.findOneAndUpdate(
           { email: socket.userEmail },
@@ -548,9 +537,9 @@ socket.on('disconnect', async () => {
       } catch (error) {
         console.error('Ошибка обновления статуса:', error);
       }
-      
-      // Уведомляем всех
+
       io.emit('user-status', { userEmail: socket.userEmail, status: 'offline' });
       console.log('👥 Остались онлайн:', Object.keys(onlineUsers));
     }
   });
+});
