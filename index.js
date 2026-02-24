@@ -374,55 +374,56 @@ const onlineUsers = {};
 io.on('connection', (socket) => {
   console.log('🔌 Новый пользователь подключился:', socket.id);
 
-    socket.on('user-connect', async (userEmail) => {
-    console.log(`👤 ${userEmail} подключился с socket.id: ${socket.id}`);
+   socket.on('user-connect', async (userEmail) => {
+  console.log(`👤 ${userEmail} подключился с socket.id: ${socket.id}`);
+  
+  // Сохраняем в памяти
+  onlineUsers[userEmail] = socket.id;
+  socket.userEmail = userEmail;
+
+  // Обновляем статус в базе данных
+  try {
+    await User.findOneAndUpdate(
+      { email: userEmail },
+      { online: true, lastSeen: new Date() }
+    );
+  } catch (error) {
+    console.error('Ошибка обновления пользователя:', error);
+  }
+
+  // Отправляем ВСЕМ обновленный список онлайн
+  io.emit('user-status', { userEmail, status: 'online' });
+  
+  // Отправляем текущему пользователю список всех онлайн
+  socket.emit('current-users', Object.keys(onlineUsers));
+  
+  console.log('👥 Текущие онлайн пользователи:', Object.keys(onlineUsers));
+});
+
+socket.on('disconnect', async () => {
+  console.log('❌ Пользователь отключился:', socket.id);
+
+  if (socket.userEmail) {
+    console.log(`👋 ${socket.userEmail} отключился`);
     
-    // Сохраняем в памяти
-    onlineUsers[userEmail] = socket.id;
-    socket.userEmail = userEmail;
-    
+    // Удаляем из памяти
+    delete onlineUsers[socket.userEmail];
+
     // Обновляем статус в базе данных
     try {
       await User.findOneAndUpdate(
-        { email: userEmail },
-        { online: true, lastSeen: new Date() }
+        { email: socket.userEmail },
+        { online: false, lastSeen: new Date() }
       );
     } catch (error) {
-      console.error('Ошибка обновления пользователя:', error);
+      console.error('Ошибка обновления статуса:', error);
     }
-    
-    // Отправляем ВСЕМ обновленный список онлайн
-    io.emit('user-status', { userEmail, status: 'online' });
-    
-    // Отправляем текущему пользователю список всех онлайн
-    socket.emit('current-users', Object.keys(onlineUsers));
-    
-    console.log('👥 Текущие онлайн пользователи:', Object.keys(onlineUsers));
-  });
 
-  socket.on('private-message', async ({ to, from, message }) => {
-    console.log(`📨 Сообщение от ${from} к ${to}: ${message}`);
-    
-    try {
-      const newMessage = new Message({ from, to, message, timestamp: new Date() });
-      await newMessage.save();
-      
-      if (onlineUsers[to]) {
-        io.to(onlineUsers[to]).emit('private-message', { from, message, timestamp: new Date() });
-        console.log('✅ Сообщение отправлено получателю');
-      } else {
-        console.log('📦 Получатель не в сети, сообщение сохранено');
-      }
-    } catch (error) {
-      console.log('❌ Ошибка:', error.message);
-    }
-  });
-
-  socket.on('typing', ({ to, from, isTyping }) => {
-    if (onlineUsers[to]) {
-      io.to(onlineUsers[to]).emit('typing-status', { from, isTyping });
-    }
-  });
+    // Уведомляем всех
+    io.emit('user-status', { userEmail: socket.userEmail, status: 'offline' });
+    console.log('👥 Остались онлайн:', Object.keys(onlineUsers));
+  }
+});
 
   socket.on('group-message', async ({ groupId, from, message }) => {
     console.log(`👥 Групповое сообщение от ${from} в группу ${groupId}: ${message}`);
