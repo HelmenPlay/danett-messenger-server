@@ -374,11 +374,29 @@ const onlineUsers = {};
 io.on('connection', (socket) => {
   console.log('🔌 Новый пользователь подключился:', socket.id);
 
-  socket.on('user-connect', (userEmail) => {
+    socket.on('user-connect', async (userEmail) => {
     console.log(`👤 ${userEmail} подключился с socket.id: ${socket.id}`);
+    
+    // Сохраняем в памяти
     onlineUsers[userEmail] = socket.id;
     socket.userEmail = userEmail;
+    
+    // Обновляем статус в базе данных
+    try {
+      await User.findOneAndUpdate(
+        { email: userEmail },
+        { online: true, lastSeen: new Date() }
+      );
+    } catch (error) {
+      console.error('Ошибка обновления пользователя:', error);
+    }
+    
+    // Отправляем ВСЕМ обновленный список онлайн
     io.emit('user-status', { userEmail, status: 'online' });
+    
+    // Отправляем текущему пользователю список всех онлайн
+    socket.emit('current-users', Object.keys(onlineUsers));
+    
     console.log('👥 Текущие онлайн пользователи:', Object.keys(onlineUsers));
   });
 
@@ -511,12 +529,27 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
+    console.log('❌ Пользователь отключился:', socket.id);
+    
     if (socket.userEmail) {
       console.log(`👋 ${socket.userEmail} отключился`);
+      
+      // Удаляем из памяти
       delete onlineUsers[socket.userEmail];
+      
+      // Обновляем статус в базе данных
+      try {
+        await User.findOneAndUpdate(
+          { email: socket.userEmail },
+          { online: false, lastSeen: new Date() }
+        );
+      } catch (error) {
+        console.error('Ошибка обновления статуса:', error);
+      }
+      
+      // Уведомляем всех
       io.emit('user-status', { userEmail: socket.userEmail, status: 'offline' });
       console.log('👥 Остались онлайн:', Object.keys(onlineUsers));
     }
   });
-});
