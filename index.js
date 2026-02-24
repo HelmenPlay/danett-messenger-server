@@ -1,10 +1,6 @@
 // Запуск сервера
 console.log('🚀 Запуск сервера...');
 
-console.log('📂 Текущая папка:', __dirname);
-console.log('📂 Проверяю пути:');
-console.log('   ./models/Group.js');
-
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -14,7 +10,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 
-const JWT_SECRET = 'your-secret-key-change-this-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
 
 // МОДЕЛИ
 const Message = require('./models/Message');
@@ -43,7 +39,6 @@ app.get('/', (req, res) => {
 });
 
 // ==================== НАСТРОЙКА ПОЧТЫ ====================
-// Используем переменные окружения
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -57,7 +52,6 @@ const transporter = nodemailer.createTransport({
 
 // ==================== API ДЛЯ ПОДТВЕРЖДЕНИЯ ПОЧТЫ ====================
 
-// Отправка кода подтверждения
 app.post('/api/auth/send-verification', async (req, res) => {
   try {
     const { email } = req.body;
@@ -95,7 +89,7 @@ app.post('/api/auth/send-verification', async (req, res) => {
           <p>Код действителен в течение 10 минут.</p>
           <hr style="border: 1px solid #e0e0e0; margin: 20px 0;">
           <p style="color: #999; font-size: 12px;">
-            Если вы не регистрировались в Danett Messenger, просто проигнорируйте это письмо.
+            Если вы не регистрировались, просто проигнорируйте это письмо.
           </p>
         </div>
       `
@@ -112,15 +106,13 @@ app.post('/api/auth/send-verification', async (req, res) => {
     
   } catch (error) {
     console.error('❌ Ошибка отправки кода:', error);
-    res.status(500).json({ error: 'Ошибка отправки письма. Проверьте настройки почты.' });
+    res.status(500).json({ error: 'Ошибка отправки письма' });
   }
 });
 
-// Подтверждение email
 app.post('/api/auth/verify-email', async (req, res) => {
   try {
     const { email, code } = req.body;
-    console.log('🔍 Проверка кода для:', email);
     
     const user = await User.findOne({ email });
     if (!user) {
@@ -135,11 +127,9 @@ app.post('/api/auth/verify-email', async (req, res) => {
     user.verificationToken = undefined;
     await user.save();
     
-    console.log('✅ Email подтверждён');
     res.json({ success: true, message: 'Email подтверждён' });
     
   } catch (error) {
-    console.error('❌ Ошибка подтверждения:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -149,7 +139,6 @@ app.post('/api/auth/verify-email', async (req, res) => {
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { username, email, phone, password } = req.body;
-    console.log('📝 Попытка регистрации:', { username, email, phone });
     
     const existingUser = await User.findOne({ 
       $or: [{ email }, { phone }, { username }] 
@@ -192,7 +181,6 @@ app.post('/api/auth/register', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Ошибка регистрации:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -229,7 +217,6 @@ app.post('/api/auth/login', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Ошибка входа:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -249,23 +236,19 @@ app.get('/api/auth/me', async (req, res) => {
   }
 });
 
-// ==================== ПОЛУЧЕНИЕ ПОЛЬЗОВАТЕЛЯ ПО EMAIL ====================
+// ==================== API для пользователя ====================
+
 app.get('/api/auth/user-by-email/:email', async (req, res) => {
   try {
     const email = decodeURIComponent(req.params.email);
-    console.log('🔍 Запрос пользователя по email:', email);
-    
     const user = await User.findOne({ email }).select('username email');
     
     if (!user) {
-      console.log('❌ Пользователь не найден');
       return res.status(404).json({ error: 'Пользователь не найден' });
     }
     
-    console.log('✅ Найден пользователь:', user.username);
     res.json({ username: user.username, email: user.email });
   } catch (error) {
-    console.error('❌ Ошибка:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -355,30 +338,26 @@ app.get('/api/group-messages/:groupId', async (req, res) => {
   }
 });
 
-// Подключение к MongoDB
+// ==================== ПОДКЛЮЧЕНИЕ К MONGODB ====================
+
 mongoose.connect('mongodb+srv://Danett:MzSKDWwFbJTU7ogo@cluster0.bjj0zzy.mongodb.net/messenger?retryWrites=true&w=majority')
   .then(() => {
     console.log('✅ MongoDB подключена');
-    console.log('📦 Проверка моделей:');
-    console.log('   Message:', typeof Message.find === 'function' ? '✅' : '❌');
-    console.log('   Group:', typeof Group.find === 'function' ? '✅' : '❌');
-    console.log('   GroupMessage:', typeof GroupMessage.find === 'function' ? '✅' : '❌');
-    console.log('   User:', typeof User.find === 'function' ? '✅' : '❌');
-    
     server.listen(5000, () => {
       console.log('🚀 Сервер запущен на http://localhost:5000');
     });
   })
   .catch(err => console.log('❌ Ошибка MongoDB:', err.message));
 
-// Онлайн пользователи
+// ==================== ОНЛАЙН ПОЛЬЗОВАТЕЛИ ====================
+
 const onlineUsers = {};
 
 io.on('connection', (socket) => {
   console.log('🔌 Новый пользователь подключился:', socket.id);
 
   socket.on('user-connect', async (userEmail) => {
-    console.log(`👤 ${userEmail} подключился с socket.id: ${socket.id}`);
+    console.log(`👤 ${userEmail} подключился`);
     
     onlineUsers[userEmail] = socket.id;
     socket.userEmail = userEmail;
@@ -394,22 +373,15 @@ io.on('connection', (socket) => {
 
     io.emit('user-status', { userEmail, status: 'online' });
     socket.emit('current-users', Object.keys(onlineUsers));
-    
-    console.log('👥 Текущие онлайн пользователи:', Object.keys(onlineUsers));
   });
 
   socket.on('private-message', async ({ to, from, message }) => {
-    console.log(`📨 Сообщение от ${from} к ${to}: ${message}`);
-    
     try {
       const newMessage = new Message({ from, to, message, timestamp: new Date() });
       await newMessage.save();
       
       if (onlineUsers[to]) {
         io.to(onlineUsers[to]).emit('private-message', { from, message, timestamp: new Date() });
-        console.log('✅ Сообщение отправлено получателю');
-      } else {
-        console.log('📦 Получатель не в сети, сообщение сохранено');
       }
     } catch (error) {
       console.log('❌ Ошибка:', error.message);
@@ -423,8 +395,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('group-message', async ({ groupId, from, message }) => {
-    console.log(`👥 Групповое сообщение от ${from} в группу ${groupId}: ${message}`);
-    
     try {
       const newMessage = new GroupMessage({ groupId, from, message, timestamp: new Date() });
       await newMessage.save();
@@ -436,57 +406,43 @@ io.on('connection', (socket) => {
         }
       });
     } catch (error) {
-      console.log('❌ Ошибка группового сообщения:', error.message);
+      console.log('❌ Ошибка:', error.message);
     }
   });
 
   // ==================== ВИДЕОЗВОНКИ ====================
   
   socket.on('call-user', (data) => {
-    console.log('📞 ===== ЗВОНОК (call-user) =====');
-    console.log('   От:', data.from);
-    console.log('   Кому:', data.to);
-    console.log('   Имя:', data.fromUsername);
+    console.log('📞 Звонок от', data.from, 'для', data.to);
     
     const targetSocket = onlineUsers[data.to];
     
     if (targetSocket) {
-      console.log(`✅ Отправляем звонок ${data.to} на сокет ${targetSocket}`);
       io.to(targetSocket).emit('incoming-call', {
         from: data.from,
         fromUsername: data.fromUsername,
         offer: data.offer
       });
     } else {
-      console.log(`❌ ${data.to} не в сети!`);
       socket.emit('call-error', { message: 'Пользователь не в сети' });
     }
   });
 
   socket.on('accept-call', (data) => {
-    console.log('✅ ===== ПРИНЯТИЕ ЗВОНКА (accept-call) =====');
-    console.log('   От (кто принял):', data.from);
-    console.log('   Кому (инициатор):', data.to);
+    console.log('✅ Звонок принят от', data.from, 'для', data.to);
     
     const targetSocket = onlineUsers[data.to];
     
     if (targetSocket) {
-      console.log(`✅ Отправляем ответ инициатору ${data.to}`);
       io.to(targetSocket).emit('call-accepted', {
         from: data.from,
         fromUsername: data.fromUsername,
         answer: data.answer
       });
-    } else {
-      console.log(`❌ Инициатор ${data.to} не в сети!`);
     }
   });
 
   socket.on('reject-call', (data) => {
-    console.log('❌ ===== ОТКЛОНЕНИЕ ЗВОНКА =====');
-    console.log('   От:', data.from);
-    console.log('   Кому:', data.to);
-    
     const targetSocket = onlineUsers[data.to];
     if (targetSocket) {
       io.to(targetSocket).emit('call-rejected', {
@@ -497,7 +453,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('ice-candidate', (data) => {
-    console.log('🧊 ICE кандидат:', data.from, '->', data.to);
     const targetSocket = onlineUsers[data.to];
     if (targetSocket) {
       io.to(targetSocket).emit('ice-candidate', {
@@ -508,10 +463,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('end-call', (data) => {
-    console.log('📴 ===== ЗАВЕРШЕНИЕ ЗВОНКА =====');
-    console.log('   От:', data.from);
-    console.log('   Кому:', data.to);
-    
     const targetSocket = onlineUsers[data.to];
     if (targetSocket) {
       io.to(targetSocket).emit('call-ended', {
@@ -522,8 +473,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', async () => {
-    console.log('❌ Пользователь отключился:', socket.id);
-
     if (socket.userEmail) {
       console.log(`👋 ${socket.userEmail} отключился`);
       
@@ -539,7 +488,6 @@ io.on('connection', (socket) => {
       }
 
       io.emit('user-status', { userEmail: socket.userEmail, status: 'offline' });
-      console.log('👥 Остались онлайн:', Object.keys(onlineUsers));
     }
   });
 });
